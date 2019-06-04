@@ -1,12 +1,12 @@
 from trezor import io, loop, res, ui
-from trezor.crypto import bip39
+from trezor.crypto import slip39
 from trezor.ui import display
 from trezor.ui.button import BTN_CLICKED, ICON, Button
 
 if __debug__:
     from apps.debug import input_signal
 
-MNEMONIC_KEYS = ("abc", "def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "yz")
+MNEMONIC_KEYS = ("ab", "cd", "ef", "ghij", "klm", "nopq", "rs", "tuv", "wxyz")
 
 
 def key_buttons(keys):
@@ -39,14 +39,15 @@ class Input(Button):
             self.enable()
             self.normal_style = ui.BTN_KEY_CONFIRM["normal"]
             self.active_style = ui.BTN_KEY_CONFIRM["active"]
-            self.icon = ui.ICON_CONFIRM
-        elif word:  # auto-complete button
-            self.enable()
-            self.normal_style = ui.BTN_KEY["normal"]
-            self.active_style = ui.BTN_KEY["active"]
             self.icon = ui.ICON_CLICK
+        elif word:  # auto-complete button
+            self.disable()
+            self.normal_style = ui.BTN_KEY["normal"]
+            self.disabled_style = ui.BTN_KEY["normal"]
         else:  # disabled button
             self.disable()
+            self.normal_style = ui.BTN_KEY["normal"]
+            self.disabled_style = ui.BTN_KEY["normal"]
             self.icon = None
 
     def render_content(self, s, ax, ay, aw, ah):
@@ -54,9 +55,12 @@ class Input(Button):
         fg_color = s["fg-color"]
         bg_color = s["bg-color"]
 
+        if len(self.content) > 3:
+            self.content = self.word
+
         p = self.pending  # should we draw the pending marker?
         t = self.content  # input content
-        w = self.word[len(t) :]  # suggested word
+        w = ""
         i = self.icon  # rendered icon
 
         tx = ax + 24  # x-offset of the content
@@ -67,7 +71,7 @@ class Input(Button):
         width = display.text_width(t, text_style)
         display.text(tx + width, ty, w, text_style, ui.GREY, bg_color)
 
-        if p:  # pending marker
+        if p and len(self.content) <= 3:  # pending marker
             pw = display.text_width(t[-1:], text_style)
             px = tx + width - pw
             display.bar(px, ty + 2, pw + 1, 3, fg_color)
@@ -82,6 +86,7 @@ class MnemonicKeyboard(ui.Widget):
     def __init__(self, prompt: str = ""):
         self.prompt = prompt
         self.input = Input(ui.grid(1, n_x=4, n_y=4, cells_x=3), "", "")
+        self.real_content = ""
         self.back = Button(
             ui.grid(0, n_x=4, n_y=4), res.load(ui.ICON_BACK), style=ui.BTN_CLEAR
         )
@@ -98,6 +103,8 @@ class MnemonicKeyboard(ui.Widget):
 
     def render(self):
         if self.input.content:
+            if len(self.real_content) > 3:
+                self.input.content = self.real_content
             # content button and backspace
             self.input.render()
             self.back.render()
@@ -115,41 +122,53 @@ class MnemonicKeyboard(ui.Widget):
 
         if self.back.touch(event, pos) == BTN_CLICKED:
             # backspace, delete the last character of input
-            self.edit(content[:-1])
+            self.real_content = self.real_content[:-1]
+            self.edit("*" * len(self.real_content))
             return
 
         if self.input.touch(event, pos) == BTN_CLICKED:
             # input press, either auto-complete or confirm
-            if word and content == word:
-                self.edit("")
-                return content
-            else:
-                self.edit(word)
+            if content == "":
                 return
+            elif len(content) > 3:
+                self.input.edit("", "", False)
+                return word
 
         for btn in self.keys:
             if btn.touch(event, pos) == BTN_CLICKED:
                 # key press, add new char to input or cycle the pending button
-                if self.pbutton is btn:
+                if self.pbutton is btn:  # cycling
                     index = (self.pindex + 1) % len(btn.content)
-                    content = content[:-1] + btn.content[index]
                 else:
                     index = 0
-                    content += btn.content[0]
+                    self.real_content += btn.content[0]
+                content = "*" * (len(self.real_content) - 1) + btn.content[index]
                 self.edit(content, btn, index)
                 return
 
-    def edit(self, content, button=None, index=0):
-        word = bip39.find_word(content) or ""
-        mask = bip39.complete_word(content)
-
+    def edit(self, content, button=None, index=0):  # TODO refactor
         self.pbutton = button
         self.pindex = index
+        word = ""
+
+        if len(self.real_content) > 3:
+            word = self.find_word()
+            content = word
+
         self.input.edit(content, word, button is not None)
 
+        self.enable_disable_buttons(button)
+
+    def find_word(self):
+        return slip39.find_word(self.real_content, True) or ""
+
+    def enable_disable_buttons(self, button=None):  # pressed button
+        mask = slip39.complete_word(self.real_content, True)
         # enable or disable key buttons
+        if len(self.real_content) > 3:
+            mask = 0
         for btn in self.keys:
-            if btn is button or compute_mask(btn.content) & mask:
+            if (btn is button or compute_mask(btn.content) & mask) and (len(self.real_content) <= 3):
                 btn.enable()
             else:
                 btn.disable()
@@ -181,10 +200,6 @@ class MnemonicKeyboard(ui.Widget):
                 event, *pos = result
                 content = self.touch(event, pos)
             else:
-                if self.input.word:
-                    # just reset the pending state
-                    self.edit(self.input.content)
-                else:
-                    # invalid character, backspace it
-                    self.edit(self.input.content[:-1])
+                # just reset the pending state -> use * to hide letter
+                self.edit("*" * len(self.input.content))
         return content
